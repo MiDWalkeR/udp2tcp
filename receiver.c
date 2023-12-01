@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <signal.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -10,10 +11,9 @@
 #include <pthread.h>
 
 #define BUFFER_SIZE 128
-#define GET_FROM_PORT 8080
 
-#define SEND_TO_PORT 8080
-#define SERVER_IP "127.0.0.1"
+void sigpipe_handler(int signo) {
+}
 
 void* receiver(void* arg) {
     int sockfd;
@@ -21,27 +21,27 @@ void* receiver(void* arg) {
     socklen_t client_len = sizeof(client_addr);
     char buffer[BUFFER_SIZE];
 
-    // Create socket
+    char* ip = strtok((char *)arg, ":"); 
+    int port = atoi(strtok(NULL, ":"));
+
     if ((sockfd = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
         perror("Socket creation failed");
         exit(EXIT_FAILURE);
     }
 
-    // Initialize server address
     memset(&server_addr, 0, sizeof(server_addr));
     server_addr.sin_family = AF_INET;
-    server_addr.sin_addr.s_addr = INADDR_ANY;
-    server_addr.sin_port = htons(GET_FROM_PORT);
+    server_addr.sin_addr.s_addr = inet_addr(ip);
+    server_addr.sin_port = htons(port);
 
-    // Bind socket
     if (bind(sockfd, (const struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
         perror("Binding failed");
         exit(EXIT_FAILURE);
     }
 
-    printf("UDP Receiver running on port %d\n", GET_FROM_PORT);
+    printf("UDP Receiver running on %s:%d\n", ip, port);
 
-    while(true) {
+    while (true) {
         memset(buffer, 0, BUFFER_SIZE);
 
         int len = recvfrom(sockfd, buffer, BUFFER_SIZE, 0, (struct sockaddr *)&client_addr, &client_len);
@@ -60,68 +60,95 @@ void* receiver(void* arg) {
 }
 
 void* sender(void* arg) {
-    int sockfd;
-    struct sockaddr_in server_addr;
-    char message[] = "Hello, TCP server!";
+    char* ip = strtok((char *)arg, ":");
+    int port = atoi(strtok(NULL, ":"));
+    char* message = "Hello, TCP server!";
 
-    // Create socket
-    if ((sockfd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
-        perror("Socket creation failed");
-        exit(EXIT_FAILURE);
-    }
+    struct sigaction sa;
+    sa.sa_handler = sigpipe_handler;
+    sa.sa_flags = 0;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGPIPE, &sa, NULL);
 
-    // Initialize server address
-    memset(&server_addr, 0, sizeof(server_addr));
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_port = htons(SEND_TO_PORT);
+    while(true) {
+        int sockfd;
+        struct sockaddr_in server_addr;
 
-    // Convert IPv4 and IPv6 addresses from text to binary form
-    if (inet_pton(AF_INET, SERVER_IP, &server_addr.sin_addr) <= 0) {
-        perror("Invalid address/ Address not supported");
-        exit(EXIT_FAILURE);
-    }
-
-    while (1) {
-        // Attempt to connect to the server
-        while (connect(sockfd, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
-            printf("Connection failed. Retrying...\n");
-            sleep(3); // Wait for 3 seconds before retrying
+        if ((sockfd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)) < 0) {
+            perror("Socket creation failed");
+            continue;
         }
 
-        // Once connected, send messages in a loop
+        memset(&server_addr, 0, sizeof(server_addr));
+        server_addr.sin_family = AF_INET;
+        server_addr.sin_port = htons(port);
+
+        if (inet_pton(AF_INET, ip, &server_addr.sin_addr) <= 0) {
+            perror("Invalid address/ Address not supported");
+            close(sockfd);
+            continue; 
+        }
+
+        printf("Attempting to connect to the server...\n");
+
+        if (connect(sockfd, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
+            perror("Connection failed");
+            close(sockfd);
+            printf("Retrying connection in 3 seconds...\n");
+            sleep(3);
+            continue;
+        }
+
+        printf("Connected to the server!\n");
+
         while (1) {
-            if (send(sockfd, message, strlen(message), 0) < 0) {
-                perror("Sending failed");
-                close(sockfd);
-                break; // Break the sending loop on failure
-            }
-            printf("Message sent: %s\n", message);
+            ssize_t ret = send(sockfd, message, strlen(message), 0);
 
-            sleep(3); // 3-second interval between messages
+            if (ret == -1) {
+                perror("Sending failed");
+                break;
+            }
+
+            printf("Message sent: %s\n", message);
+            sleep(3);
         }
+
+        close(sockfd);
     }
 
-    close(sockfd);
     return NULL;
 }
 
-int main(void) {
+int main(int argc, char *argv[]) {
+    if (argc != 3) {
+        fprintf(stderr, "Usage: %s <IP:port>\n", argv[0]);
+        exit(EXIT_FAILURE);
+    }
+
     pthread_t recv_thread;
     pthread_t send_thread;
 
-    if(pthread_create(&recv_thread, NULL, receiver, NULL) != 0) {
+    if (pthread_create(&recv_thread, NULL, receiver, argv[1]) != 0) {
         perror("Thread creation failed");
+        exit(EXIT_FAILURE);
+    }
+
+    if (pthread_create(&send_thread, NULL, sender, argv[2]) != 0) {
+        perror("Thread creation failed");
+        exit(EXIT_FAILURE);
+    }
+
+
+    if (pthread_join(recv_thread, NULL) != 0) {
+        perror("Thread join failed");
+        exit(EXIT_FAILURE);
+    }
+
+    if (pthread_join(send_thread, NULL) != 0) {
+        perror("Thread join failed");
         exit(EXIT_FAILURE);
     }
     
-    if(pthread_create(&send_thread, NULL, sender, NULL) != 0) {
-        perror("Thread creation failed");
-        exit(EXIT_FAILURE);
-    }
-
-    pthread_join(recv_thread, NULL);
-    pthread_join(send_thread, NULL);
-
     return 0;
 }
 

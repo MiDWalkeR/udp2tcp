@@ -1,6 +1,6 @@
 CC = gcc
 CFLAGS = -O2 -lpthread
-TARGET = server
+TARGET = receiver
 
 all: $(TARGET)
 
