@@ -119,14 +119,6 @@ static ssize_t get_and_update_message(const int sockfd, char *buffer)
         return -1;
     }
 
-    char sender_ip[INET_ADDRSTRLEN];
-    inet_ntop(AF_INET, &(client_addr.sin_addr), sender_ip, INET_ADDRSTRLEN);
-
-    //if (strcmp(sender_ip, tcp_server_ip) == 0) {
-    //    printf("Received packet from TCP server, ignoring...\n");
-    //    return -1; 
-    //}
-
     if (len < MIN_UDP_PACKET_SIZE || len >= MAX_UDP_PACKET_SIZE) {
         printf("Received message does not meet size criteria: %ld bytes\n", len);
         return -1; 
@@ -136,10 +128,6 @@ static ssize_t get_and_update_message(const int sockfd, char *buffer)
 }
 
 static void send_message_to_tcp_thread(const char* buffer, const size_t sz) {
-    struct mq_attr attr;
-    struct mq_attr old_attr;
-
-    mq_setattr(mqdes, &attr, &old_attr); 
 
     int ret = mq_send(mqdes, buffer, sz, 0);
     if(ret != 0)
@@ -147,9 +135,6 @@ static void send_message_to_tcp_thread(const char* buffer, const size_t sz) {
         perror("mq_send");
         logger_msg("mq send: %s", strerror(errno));
     }
-
-    mq_getattr(mqdes, &attr); 
-    mq_setattr(mqdes, &old_attr, 0); 
 }
 
 static void update_buffer_with_chars(char *buffer, const size_t sz, const struct char_set *chars) {
@@ -168,18 +153,13 @@ static void update_buffer_with_chars(char *buffer, const size_t sz, const struct
 
 static void get_message_from_udp_thread(char* buffer) {
     struct mq_attr attr;
-    struct mq_attr old_attr;
     unsigned int prio;
 
     mq_getattr(mqdes, &attr);
 
     if (attr.mq_curmsgs != 0) {
-        attr.mq_flags = O_NONBLOCK;
 
-        mq_setattr(mqdes, &attr, &old_attr);
         ssize_t bytes_read = mq_receive(mqdes, buffer, MAX_MSG_SIZE, &prio);
-        mq_setattr(mqdes, &old_attr, 0);
-
         ssize_t ret = send(sockfd_tcp, buffer, bytes_read, 0);
 
         if (ret == -1) {
