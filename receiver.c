@@ -21,6 +21,17 @@ enum buffer_sizes {
     MAX_MSG_SIZE = MAX_UDP_PACKET_SIZE
 };
 
+static struct input {
+    char *udp_ip_port;
+    char *tcp_ip_port;
+    struct char_set {
+        char first_char;
+        char second_char;
+        char third_char;
+        char forth_char;
+    } char_set;
+} in_params;
+
 static pthread_mutex_t m_connect = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t c_connect = PTHREAD_COND_INITIALIZER;
 
@@ -80,10 +91,10 @@ static ssize_t get_and_update_message(const int sockfd, char *buffer)
     char sender_ip[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, &(client_addr.sin_addr), sender_ip, INET_ADDRSTRLEN);
 
-    if (strcmp(sender_ip, tcp_server_ip) == 0) {
-        printf("Received packet from TCP server, ignoring...\n");
-        return -1; 
-    }
+    //if (strcmp(sender_ip, tcp_server_ip) == 0) {
+    //    printf("Received packet from TCP server, ignoring...\n");
+    //    return -1; 
+    //}
 
     if (len < MIN_UDP_PACKET_SIZE || len >= MAX_UDP_PACKET_SIZE) {
         printf("Received message does not meet size criteria: %ld bytes\n", len);
@@ -107,6 +118,20 @@ static void send_message_to_tcp_thread(const char* buffer, const size_t sz) {
 
     mq_getattr(mqdes, &attr); 
     mq_setattr(mqdes, &old_attr, 0); 
+}
+
+static void update_buffer_with_chars(char *buffer, const size_t sz, const struct char_set *chars) {
+    const size_t chars_set_sz = sizeof(struct char_set) / sizeof(chars->first_char);
+
+    if (sz + chars_set_sz >= TOTAL_BUFFER_SIZE) {
+        fprintf(stderr, "Buffer is too small to add characters.\n");
+        return;
+    }
+
+    memmove(buffer + chars_set_sz, buffer, sz);
+    memcpy(buffer, chars, chars_set_sz);
+
+    printf("Updated Buffer: %s\n", buffer);
 }
 
 static void get_message_from_udp_thread(char* buffer) {
@@ -137,15 +162,18 @@ static void get_message_from_udp_thread(char* buffer) {
             return;
         } 
 
-        memset(buffer, 0, TOTAL_BUFFER_SIZE);
         printf("Message sent: %s\n", buffer);
+        memset(buffer, 0, TOTAL_BUFFER_SIZE);
     }
 }
 
 void* receiver(void* arg) {
     static char buffer[TOTAL_BUFFER_SIZE];
 
-    int sockfd_udp = get_sockfd_udp_connection((char *)arg);
+    char *udp_ip_port = ((struct input *)arg)->udp_ip_port;
+    struct char_set *chars = &((struct input *)arg)->char_set;
+
+    int sockfd_udp = get_sockfd_udp_connection(udp_ip_port);
     if(sockfd_udp == -1) {
         exit(EXIT_FAILURE);
     }
@@ -157,9 +185,11 @@ void* receiver(void* arg) {
         }
         pthread_mutex_unlock(&m_connect);
 
-        ssize_t sz = get_and_update_message(sockfd_udp, buffer);
+        const ssize_t sz = get_and_update_message(sockfd_udp, buffer);
+        const size_t chars_set_sz = sizeof(struct char_set) / sizeof(chars->first_char);
         if (sz > 0) {
-            send_message_to_tcp_thread(buffer, sz); 
+            update_buffer_with_chars(buffer, sz, chars);
+            send_message_to_tcp_thread(buffer, sz + chars_set_sz); 
             printf("Received message: %s\n", buffer);
         }
     }
@@ -266,11 +296,22 @@ void* keep_alive(void* arg) {
 }
 
 int main(int argc, char *argv[]) {
-    if (argc != 3) {
-        fprintf(stderr, "Usage: %s <IP:port>\n", argv[0]);
+    if (argc != 7) {
+        fprintf(
+            stderr,
+            "Usage: %s <IP:port> <IP:port> <first_char>, <second_char>, <third_char>, <forth_char>,\n",
+            argv[0]);
+
         exit(EXIT_FAILURE);
     }
 
+    in_params.udp_ip_port = argv[1];
+    in_params.tcp_ip_port = argv[2];
+    in_params.char_set.first_char  = *(char*)argv[3];
+    in_params.char_set.second_char = *(char*)argv[4];
+    in_params.char_set.third_char  = *(char*)argv[5]; 
+    in_params.char_set.forth_char  = *(char*)argv[6]; 
+    
     struct mq_attr msq_attr;
     mqdes = mq_open(MESSAGE_QUEUE_NAME, O_RDWR | O_CREAT, 0664, &msq_attr);
 
@@ -278,17 +319,17 @@ int main(int argc, char *argv[]) {
     pthread_t send_thread;
     pthread_t alive_thread;
 
-    if (pthread_create(&recv_thread, NULL, receiver, argv[1]) != 0) {
+    if (pthread_create(&recv_thread, NULL, receiver, (void *)&in_params) != 0) {
         perror("Thread creation failed");
         exit(EXIT_FAILURE);
     }
 
-    if (pthread_create(&send_thread, NULL, sender, argv[2]) != 0) {
+    if (pthread_create(&send_thread, NULL, sender, in_params.tcp_ip_port) != 0) {
         perror("Thread creation failed");
         exit(EXIT_FAILURE);
     }
     
-    if (pthread_create(&alive_thread, NULL, keep_alive, argv[2]) != 0) {
+    if (pthread_create(&alive_thread, NULL, keep_alive, NULL) != 0) {
         perror("Thread creation failed");
         exit(EXIT_FAILURE);
     }
