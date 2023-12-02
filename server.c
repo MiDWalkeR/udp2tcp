@@ -12,9 +12,9 @@
 static int server_fd;
 static struct sockaddr_in address;
 static size_t addrlen = sizeof(address);
-static char buffer[BUFFER_SIZE];
 
 void send_udp(const char *ip, int port) {
+    static char buffer[BUFFER_SIZE];
     int udp_socket;
     struct sockaddr_in udp_address;
 
@@ -39,6 +39,7 @@ void send_udp(const char *ip, int port) {
 void send_tcp(const char *ip, int port) {
     int tcp_socket;
     struct sockaddr_in tcp_address;
+    static char buffer[BUFFER_SIZE];
 
     if ((tcp_socket = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
         perror("TCP Socket creation failed");
@@ -66,7 +67,7 @@ void send_tcp(const char *ip, int port) {
 
 void* send_messages(void* arg) {
     while (true) {
-        send_udp("127.0.0.1", 8080);
+        //send_udp("127.0.0.1", 8080);
         send_tcp("127.0.0.1", 8080);
 
         sleep(5); 
@@ -75,6 +76,8 @@ void* send_messages(void* arg) {
 }
 
 void* receive_messages(void* arg) {
+    static char buffer[BUFFER_SIZE];
+
     while (true) {
         int new_socket = accept(server_fd, (struct sockaddr *)&address, (socklen_t*)&addrlen);
         if (new_socket < 0) {
@@ -86,7 +89,6 @@ void* receive_messages(void* arg) {
         int valread;
         while ((valread = read(new_socket, buffer, BUFFER_SIZE)) > 0) {
             printf("Received message: %s\n", buffer);
-            memset(buffer, 0, sizeof(buffer));
         }
 
         if (valread == 0) {
