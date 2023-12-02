@@ -58,12 +58,6 @@ static int get_sockfd_udp_connection(char *ip_port) {
     return sockfd_udp;
 }
 
-void sigpipe_handler(int signo) {
-    if (signo == SIGPIPE) {
-        printf("%s\r\n", __FUNCTION__);
-    }
-}
-
 static ssize_t get_and_update_message(const int sockfd, char *buffer)
 {
     struct sockaddr_in client_addr;
@@ -115,6 +109,39 @@ static void send_message_to_tcp_thread(const char* buffer, const size_t sz) {
     mq_setattr(mqdes, &old_attr, 0); 
 }
 
+static void get_message_from_udp_thread(char* buffer) {
+    struct mq_attr attr;
+    struct mq_attr old_attr;
+    unsigned int prio;
+
+    mq_getattr(mqdes, &attr);
+
+    if (attr.mq_curmsgs != 0) {
+        attr.mq_flags = O_NONBLOCK;
+
+        mq_setattr(mqdes, &attr, &old_attr);
+        ssize_t bytes_read = mq_receive(mqdes, buffer, MAX_MSG_SIZE, &prio);
+        mq_setattr(mqdes, &old_attr, 0);
+
+        ssize_t ret = send(sockfd_tcp, buffer, bytes_read, 0);
+
+        if (ret == -1) {
+            memset(buffer, 0, TOTAL_BUFFER_SIZE);
+            pthread_mutex_lock(&m_connect);
+            is_tcp_connected = false;
+            pthread_cond_signal(&c_connect);
+            pthread_mutex_unlock(&m_connect);
+            perror("Sending failed");
+            close(sockfd_tcp);
+
+            return;
+        } 
+
+        memset(buffer, 0, TOTAL_BUFFER_SIZE);
+        printf("Message sent: %s\n", buffer);
+    }
+}
+
 void* receiver(void* arg) {
     static char buffer[TOTAL_BUFFER_SIZE];
 
@@ -143,59 +170,61 @@ void* receiver(void* arg) {
     return NULL;
 }
 
+static int connect_to_the_server(const char* ip, const uint32_t tcp_server_port) {
+    struct sockaddr_in server_addr;
+
+    if ((sockfd_tcp = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)) < 0) {
+        perror("Socket creation failed");
+    }
+
+    memset(&server_addr, 0, sizeof(server_addr));
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_port = htons(tcp_server_port);
+
+    if (inet_pton(AF_INET, ip, &server_addr.sin_addr) <= 0) {
+        perror("Invalid address/ Address not supported");
+        close(sockfd_tcp);
+    }
+
+    printf("Attempting to connect to the server...\n");
+
+    if(connect(sockfd_tcp, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
+        pthread_mutex_lock(&m_connect);
+        is_tcp_connected = false;
+        pthread_cond_signal(&c_connect);
+        pthread_mutex_unlock(&m_connect);
+
+        perror("Connection failed");
+        close(sockfd_tcp);
+
+        printf("Retrying connection in 3 seconds...\n");
+
+        return -1;
+    }
+
+    pthread_mutex_lock(&m_connect);
+    is_tcp_connected = true;
+    pthread_cond_signal(&c_connect);
+    pthread_mutex_unlock(&m_connect);
+
+    return 0;
+}
+
 void* sender(void* arg) {
     const char *ip = strtok((char *)arg, ":");
     static char buffer[TOTAL_BUFFER_SIZE];
-    struct mq_attr attr;
-    struct mq_attr old_attr;
-    unsigned int prio;
-
     tcp_server_port = atoi(strtok(NULL, ":"));
     memcpy(tcp_server_ip, ip, strlen(ip));
     
-    struct sigaction sa;
-    sa.sa_handler = sigpipe_handler;
-    sa.sa_flags = 0;
-    sigemptyset(&sa.sa_mask);
-    sigaction(SIGPIPE, &sa, NULL);
+    signal(SIGPIPE, SIG_IGN);
     
-    struct sockaddr_in server_addr;
-
     while(true) {
-        if ((sockfd_tcp = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)) < 0) {
-            perror("Socket creation failed");
-        }
-
-        memset(&server_addr, 0, sizeof(server_addr));
-        server_addr.sin_family = AF_INET;
-        server_addr.sin_port = htons(tcp_server_port);
-
-        if (inet_pton(AF_INET, ip, &server_addr.sin_addr) <= 0) {
-            perror("Invalid address/ Address not supported");
-            close(sockfd_tcp);
-        }
-
-        printf("Attempting to connect to the server...\n");
-
-        if(connect(sockfd_tcp, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
-            pthread_mutex_lock(&m_connect);
-            is_tcp_connected = false;
-            pthread_cond_signal(&c_connect);
-            pthread_mutex_unlock(&m_connect);
-
-            perror("Connection failed");
-            close(sockfd_tcp);
-
-            printf("Retrying connection in 3 seconds...\n");
-            sleep(3);
+        int ret = connect_to_the_server(ip, tcp_server_port);
+        if (ret == -1) {
+            sleep(2);
             continue;
         }
 
-        pthread_mutex_lock(&m_connect);
-        is_tcp_connected = true;
-        pthread_cond_signal(&c_connect);
-        pthread_mutex_unlock(&m_connect);
-        
         printf("Connected to the server!\n");
 
         while (true) {
@@ -203,34 +232,10 @@ void* sender(void* arg) {
                 break;
             }
 
-            mq_getattr(mqdes, &attr);
-
-            if (attr.mq_curmsgs != 0) {
-                attr.mq_flags = O_NONBLOCK;
-
-                mq_setattr(mqdes, &attr, &old_attr);
-                ssize_t bytes_read = mq_receive(mqdes, buffer, MAX_MSG_SIZE, &prio);
-                mq_setattr(mqdes, &old_attr, 0);
-
-                ssize_t ret = send(sockfd_tcp, buffer, bytes_read, 0);
-
-                if (ret == -1) {
-                    pthread_mutex_lock(&m_connect);
-                    is_tcp_connected = false;
-                    pthread_cond_signal(&c_connect);
-                    pthread_mutex_unlock(&m_connect);
-                    perror("Sending failed");
-                    close(sockfd_tcp);
-
-                    break;
-                } 
-
-                printf("Message sent: %s\n", buffer);
-                sleep(3);
-            }
+            get_message_from_udp_thread(buffer);
+            sleep(3);
         }
     }
-
 
     mq_close(mqdes);
     close(sockfd_tcp);
