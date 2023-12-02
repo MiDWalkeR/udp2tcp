@@ -11,6 +11,8 @@
 #include <pthread.h>
 #include <errno.h>
 #include <mqueue.h>
+#include <stdarg.h>
+#include <time.h>
 
 #define MESSAGE_QUEUE_NAME "/udp_to_tcp_msq"
 
@@ -30,6 +32,7 @@ static struct input {
         char third_char;
         char forth_char;
     } char_set;
+    const char *log_file;
 } in_params;
 
 static pthread_mutex_t m_connect = PTHREAD_MUTEX_INITIALIZER;
@@ -42,6 +45,30 @@ static uint32_t tcp_server_port;
 static mqd_t mqdes;
 static int sockfd_tcp;
 
+static void logger_msg(const char *format, ...) {
+    FILE *file = fopen(in_params.log_file, "a");
+
+    if (file != NULL) {
+        va_list args;
+        va_start(args, format);
+
+        time_t rawtime;
+        struct tm *timeinfo;
+        char buffer[80];
+
+        time(&rawtime);
+        timeinfo = localtime(&rawtime);
+        strftime(buffer, sizeof(buffer), "[%Y-%m-%d %H:%M:%S] ", timeinfo);
+
+        fprintf(file, "%s", buffer);
+        vfprintf(file, format, args);
+        fprintf(file, "\n");
+
+        va_end(args);
+        fclose(file);
+    }
+}
+
 static int get_sockfd_udp_connection(char *ip_port) {
     int sockfd_udp = 0;
     struct sockaddr_in server_addr;
@@ -51,6 +78,7 @@ static int get_sockfd_udp_connection(char *ip_port) {
 
     if ((sockfd_udp = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
         perror("Socket creation failed");
+        logger_msg("Socket creation failed: %s", strerror(errno));
         return -1;
     }
 
@@ -61,10 +89,12 @@ static int get_sockfd_udp_connection(char *ip_port) {
 
     if (bind(sockfd_udp, (const struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
         perror("Binding failed");
+        logger_msg("Binding failed: %s", strerror(errno));
         return -1;
     }
 
-    printf("UDP Receiver running on %s:%d\n", ip, port);
+    printf("UDP Receiver running on %s:%d", ip, port);
+    logger_msg("UDP Receiver running on %s:%d", ip, port);
 
     return sockfd_udp;
 }
@@ -85,6 +115,7 @@ static ssize_t get_and_update_message(const int sockfd, char *buffer)
 
     if (len < 0) {
         perror("Receiving failed");
+        logger_msg("Receiving failed: %s", strerror(errno));
         return -1;
     }
 
@@ -114,6 +145,7 @@ static void send_message_to_tcp_thread(const char* buffer, const size_t sz) {
     if(ret != 0)
     {
         perror("mq_send");
+        logger_msg("mq send: %s", strerror(errno));
     }
 
     mq_getattr(mqdes, &attr); 
@@ -157,12 +189,14 @@ static void get_message_from_udp_thread(char* buffer) {
             pthread_cond_signal(&c_connect);
             pthread_mutex_unlock(&m_connect);
             perror("Sending failed");
+            logger_msg("Sending failed: %s", strerror(errno));
             close(sockfd_tcp);
 
             return;
         } 
 
         printf("Message sent: %s\n", buffer);
+        logger_msg("Message sent: %s\n", buffer);
         memset(buffer, 0, TOTAL_BUFFER_SIZE);
     }
 }
@@ -191,6 +225,7 @@ void* receiver(void* arg) {
             update_buffer_with_chars(buffer, sz, chars);
             send_message_to_tcp_thread(buffer, sz + chars_set_sz); 
             printf("Received message: %s\n", buffer);
+            logger_msg("Message sent: %s\n", buffer);
         }
     }
 
@@ -205,6 +240,7 @@ static int connect_to_the_server(const char* ip, const uint32_t tcp_server_port)
 
     if ((sockfd_tcp = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)) < 0) {
         perror("Socket creation failed");
+        logger_msg("Socket creation failed %s", strerror(errno));
     }
 
     memset(&server_addr, 0, sizeof(server_addr));
@@ -213,10 +249,12 @@ static int connect_to_the_server(const char* ip, const uint32_t tcp_server_port)
 
     if (inet_pton(AF_INET, ip, &server_addr.sin_addr) <= 0) {
         perror("Invalid address/ Address not supported");
+        logger_msg("Invalid address/ Address not supported: %s", strerror(errno));
         close(sockfd_tcp);
     }
 
     printf("Attempting to connect to the server...\n");
+    logger_msg("Attempting to connect to the server...\n");
 
     if(connect(sockfd_tcp, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
         pthread_mutex_lock(&m_connect);
@@ -225,9 +263,11 @@ static int connect_to_the_server(const char* ip, const uint32_t tcp_server_port)
         pthread_mutex_unlock(&m_connect);
 
         perror("Connection failed");
+        logger_msg("Connection failed %s", strerror(errno));
         close(sockfd_tcp);
 
         printf("Retrying connection in 3 seconds...\n");
+        logger_msg("Retrying connection in 3 seconds...\n");
 
         return -1;
     }
@@ -256,6 +296,7 @@ void* sender(void* arg) {
         }
 
         printf("Connected to the server!\n");
+        logger_msg("Connected to the server!\n");
 
         while (true) {
             if (is_tcp_connected == false) {
@@ -283,6 +324,7 @@ void* keep_alive(void* arg) {
             if (ret == -1) {
                 is_tcp_connected = false;
                 perror("Sending failed");
+                logger_msg("Sending failed %s", strerror(errno));
                 close(sockfd_tcp);
             } 
         }
@@ -296,10 +338,10 @@ void* keep_alive(void* arg) {
 }
 
 int main(int argc, char *argv[]) {
-    if (argc != 7) {
+    if (argc != 8) {
         fprintf(
             stderr,
-            "Usage: %s <IP:port> <IP:port> <first_char>, <second_char>, <third_char>, <forth_char>,\n",
+            "Usage: %s <IP:port> <IP:port> <log_path> <first_char> <second_char> <third_char> <forth_char>\n",
             argv[0]);
 
         exit(EXIT_FAILURE);
@@ -307,10 +349,11 @@ int main(int argc, char *argv[]) {
 
     in_params.udp_ip_port = argv[1];
     in_params.tcp_ip_port = argv[2];
-    in_params.char_set.first_char  = *(char*)argv[3];
-    in_params.char_set.second_char = *(char*)argv[4];
-    in_params.char_set.third_char  = *(char*)argv[5]; 
-    in_params.char_set.forth_char  = *(char*)argv[6]; 
+    in_params.log_file = argv[3]; 
+    in_params.char_set.first_char  = *(char*)argv[4];
+    in_params.char_set.second_char = *(char*)argv[5];
+    in_params.char_set.third_char  = *(char*)argv[6]; 
+    in_params.char_set.forth_char  = *(char*)argv[7]; 
     
     struct mq_attr msq_attr;
     mqdes = mq_open(MESSAGE_QUEUE_NAME, O_RDWR | O_CREAT, 0664, &msq_attr);
@@ -321,31 +364,37 @@ int main(int argc, char *argv[]) {
 
     if (pthread_create(&recv_thread, NULL, receiver, (void *)&in_params) != 0) {
         perror("Thread creation failed");
+        logger_msg("Thread creation failed %s", strerror(errno));
         exit(EXIT_FAILURE);
     }
 
     if (pthread_create(&send_thread, NULL, sender, in_params.tcp_ip_port) != 0) {
         perror("Thread creation failed");
+        logger_msg("Thread creation failed %s", strerror(errno));
         exit(EXIT_FAILURE);
     }
     
     if (pthread_create(&alive_thread, NULL, keep_alive, NULL) != 0) {
         perror("Thread creation failed");
+        logger_msg("Thread creation failed %s", strerror(errno));
         exit(EXIT_FAILURE);
     }
 
     if (pthread_join(recv_thread, NULL) != 0) {
         perror("Thread join failed");
+        logger_msg("Thread creation failed %s", strerror(errno));
         exit(EXIT_FAILURE);
     }
 
     if (pthread_join(send_thread, NULL) != 0) {
         perror("Thread join failed");
+        logger_msg("Thread creation failed %s", strerror(errno));
         exit(EXIT_FAILURE);
     }
     
     if (pthread_join(alive_thread, NULL) != 0) {
         perror("Thread join failed");
+        logger_msg("Thread creation failed %s", strerror(errno));
         exit(EXIT_FAILURE);
     }
 
