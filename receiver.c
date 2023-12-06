@@ -128,12 +128,12 @@ static ssize_t get_and_update_message(const int sockfd, char *buffer)
 }
 
 static void send_message_to_tcp_thread(const char* buffer, const size_t sz) {
-
     int ret = mq_send(mqdes, buffer, sz, 0);
     if(ret != 0)
     {
         perror("mq_send");
         logger_msg("mq send: %s", strerror(errno));
+        mq_close(mqdes);
     }
 }
 
@@ -160,6 +160,12 @@ static void get_message_from_udp_thread(char* buffer) {
     if (attr.mq_curmsgs != 0) {
 
         ssize_t bytes_read = mq_receive(mqdes, buffer, MAX_MSG_SIZE, &prio);
+        if (bytes_read == -1) {
+            perror("mq_receive");
+            mq_close(mqdes);
+
+            exit(EXIT_FAILURE);
+        }
         ssize_t ret = send(sockfd_tcp, buffer, bytes_read, 0);
 
         if (ret == -1) {
@@ -335,7 +341,12 @@ int main(int argc, char *argv[]) {
     in_params.char_set.third_char  = *(char*)argv[6]; 
     in_params.char_set.forth_char  = *(char*)argv[7]; 
     
-    struct mq_attr msq_attr;
+    struct mq_attr msq_attr = {
+        .mq_flags = 0,
+        .mq_maxmsg = 10,
+        .mq_msgsize = MAX_MSG_SIZE,
+        .mq_curmsgs = 0
+    };
     mqdes = mq_open(MESSAGE_QUEUE_NAME, O_RDWR | O_CREAT, 0664, &msq_attr);
 
     pthread_t recv_thread;
